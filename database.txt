@@ -1,0 +1,458 @@
+-- =====================================================
+-- BOCKSHEETS MVP DATABASE SCHEMA
+-- PostgreSQL (Supabase)
+-- =====================================================
+
+-- Enable UUID extension
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- =====================================================
+-- 1. USERS TABLE (extends Supabase auth.users)
+-- =====================================================
+CREATE TABLE public.profiles (
+    id UUID REFERENCES auth.users(id) ON DELETE CASCADE PRIMARY KEY,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    email VARCHAR(255) UNIQUE NOT NULL,
+    full_name VARCHAR(100),
+    avatar_url TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Index for faster lookups
+CREATE INDEX idx_profiles_username ON public.profiles(username);
+CREATE INDEX idx_profiles_email ON public.profiles(email);
+
+-- =====================================================
+-- 2. SPREADSHEETS TABLE
+-- =====================================================
+CREATE TABLE public.spreadsheets (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    owner_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
+    title VARCHAR(255) NOT NULL DEFAULT 'Untitled Spreadsheet',
+    description TEXT,
+    row_count INTEGER DEFAULT 100 CHECK (row_count > 0 AND row_count <= 1000),
+    column_count INTEGER DEFAULT 26 CHECK (column_count > 0 AND column_count <= 100),
+    is_deleted BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_accessed_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- Indexes for performance
+CREATE INDEX idx_spreadsheets_owner ON public.spreadsheets(owner_id);
+CREATE INDEX idx_spreadsheets_updated ON public.spreadsheets(updated_at DESC);
+CREATE INDEX idx_spreadsheets_deleted ON public.spreadsheets(is_deleted) WHERE is_deleted = FALSE;
+
+-- =====================================================
+-- 3. CELLS TABLE (stores cell data)
+-- =====================================================
+CREATE TABLE public.cells (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    spreadsheet_id UUID REFERENCES public.spreadsheets(id) ON DELETE CASCADE NOT NULL,
+    row_index INTEGER NOT NULL CHECK (row_index >= 0),
+    column_index INTEGER NOT NULL CHECK (column_index >= 0),
+    
+    -- Cell content
+    value TEXT, -- Raw value entered by user
+    display_value TEXT, -- Computed/formatted value to display
+    data_type VARCHAR(20) DEFAULT 'text' CHECK (data_type IN ('text', 'number', 'date', 'formula', 'boolean')),
+    
+    -- Formula support
+    formula TEXT, -- Formula string if cell contains formula (e.g., "=SUM(A1:A5)")
+    
+    -- Formatting
+    font_weight VARCHAR(20) DEFAULT 'normal' CHECK (font_weight IN ('normal', 'bold')),
+    font_style VARCHAR(20) DEFAULT 'normal' CHECK (font_style IN ('normal', 'italic')),
+    text_decoration VARCHAR(20) DEFAULT 'none' CHECK (text_decoration IN ('none', 'underline')),
+    text_align VARCHAR(20) DEFAULT 'left' CHECK (text_align IN ('left', 'center', 'right')),
+    background_color VARCHAR(7) DEFAULT '#FFFFFF', -- Hex color
+    font_color VARCHAR(7) DEFAULT '#000000', -- Hex color
+    font_size INTEGER DEFAULT 12 CHECK (font_size >= 8 AND font_size <= 72),
+    
+    -- Metadata
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    -- Ensure unique cell position per spreadsheet
+    UNIQUE(spreadsheet_id, row_index, column_index)
+);
+
+-- Indexes for fast cell lookups
+CREATE INDEX idx_cells_spreadsheet ON public.cells(spreadsheet_id);
+CREATE INDEX idx_cells_position ON public.cells(spreadsheet_id, row_index, column_index);
+CREATE INDEX idx_cells_formula ON public.cells(spreadsheet_id) WHERE formula IS NOT NULL;
+
+-- =====================================================
+-- 4. COLUMN_SETTINGS TABLE (column width, visibility)
+-- =====================================================
+CREATE TABLE public.column_settings (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    spreadsheet_id UUID REFERENCES public.spreadsheets(id) ON DELETE CASCADE NOT NULL,
+    column_index INTEGER NOT NULL CHECK (column_index >= 0),
+    width INTEGER DEFAULT 100 CHECK (width >= 50 AND width <= 500), -- pixels
+    is_hidden BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    UNIQUE(spreadsheet_id, column_index)
+);
+
+CREATE INDEX idx_column_settings_spreadsheet ON public.column_settings(spreadsheet_id);
+
+-- =====================================================
+-- 5. ROW_SETTINGS TABLE (row height, visibility)
+-- =====================================================
+CREATE TABLE public.row_settings (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    spreadsheet_id UUID REFERENCES public.spreadsheets(id) ON DELETE CASCADE NOT NULL,
+    row_index INTEGER NOT NULL CHECK (row_index >= 0),
+    height INTEGER DEFAULT 25 CHECK (height >= 20 AND height <= 200), -- pixels
+    is_hidden BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    UNIQUE(spreadsheet_id, row_index)
+);
+
+CREATE INDEX idx_row_settings_spreadsheet ON public.row_settings(spreadsheet_id);
+
+-- =====================================================
+-- 6. SHARE_LINKS TABLE (for sharing sheets)
+-- =====================================================
+CREATE TABLE public.share_links (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    spreadsheet_id UUID REFERENCES public.spreadsheets(id) ON DELETE CASCADE NOT NULL,
+    created_by UUID REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
+    share_token VARCHAR(64) UNIQUE NOT NULL, -- Random token for URL
+    permission_level VARCHAR(20) DEFAULT 'view' CHECK (permission_level IN ('view', 'edit')),
+    is_active BOOLEAN DEFAULT TRUE,
+    expires_at TIMESTAMP WITH TIME ZONE, -- NULL means no expiration
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_accessed_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX idx_share_links_token ON public.share_links(share_token);
+CREATE INDEX idx_share_links_spreadsheet ON public.share_links(spreadsheet_id);
+
+-- =====================================================
+-- 7. COLLABORATORS TABLE (for future collaboration)
+-- =====================================================
+CREATE TABLE public.collaborators (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    spreadsheet_id UUID REFERENCES public.spreadsheets(id) ON DELETE CASCADE NOT NULL,
+    user_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE NOT NULL,
+    permission_level VARCHAR(20) DEFAULT 'view' CHECK (permission_level IN ('view', 'edit', 'admin')),
+    invited_by UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    
+    UNIQUE(spreadsheet_id, user_id)
+);
+
+CREATE INDEX idx_collaborators_spreadsheet ON public.collaborators(spreadsheet_id);
+CREATE INDEX idx_collaborators_user ON public.collaborators(user_id);
+
+-- =====================================================
+-- 8. ACTIVITY_LOG TABLE (track changes for history)
+-- =====================================================
+CREATE TABLE public.activity_log (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    spreadsheet_id UUID REFERENCES public.spreadsheets(id) ON DELETE CASCADE NOT NULL,
+    user_id UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+    action_type VARCHAR(50) NOT NULL, -- 'cell_update', 'row_insert', 'column_delete', etc.
+    details JSONB, -- Store change details
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_activity_log_spreadsheet ON public.activity_log(spreadsheet_id, created_at DESC);
+CREATE INDEX idx_activity_log_user ON public.activity_log(user_id);
+
+-- =====================================================
+-- 9. FUNCTIONS AND TRIGGERS
+-- =====================================================
+
+-- Function to update updated_at timestamp
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Apply to relevant tables
+CREATE TRIGGER update_profiles_updated_at BEFORE UPDATE ON public.profiles
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_spreadsheets_updated_at BEFORE UPDATE ON public.spreadsheets
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_cells_updated_at BEFORE UPDATE ON public.cells
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_column_settings_updated_at BEFORE UPDATE ON public.column_settings
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_row_settings_updated_at BEFORE UPDATE ON public.row_settings
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+-- Function to generate share token
+CREATE OR REPLACE FUNCTION generate_share_token()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.share_token IS NULL THEN
+        NEW.share_token = encode(gen_random_bytes(32), 'hex');
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER generate_share_token_trigger BEFORE INSERT ON public.share_links
+    FOR EACH ROW EXECUTE FUNCTION generate_share_token();
+
+-- =====================================================
+-- 10. ROW LEVEL SECURITY (RLS) POLICIES
+-- =====================================================
+
+-- Enable RLS on all tables
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.spreadsheets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.cells ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.column_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.row_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.share_links ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.collaborators ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.activity_log ENABLE ROW LEVEL SECURITY;
+
+-- Profiles: Users can read and update their own profile
+CREATE POLICY "Users can view their own profile" ON public.profiles
+    FOR SELECT USING (auth.uid() = id);
+
+CREATE POLICY "Users can update their own profile" ON public.profiles
+    FOR UPDATE USING (auth.uid() = id);
+
+-- Spreadsheets: Users can manage their own spreadsheets
+CREATE POLICY "Users can view their own spreadsheets" ON public.spreadsheets
+    FOR SELECT USING (
+        auth.uid() = owner_id OR
+        EXISTS (
+            SELECT 1 FROM public.collaborators
+            WHERE collaborators.spreadsheet_id = spreadsheets.id
+            AND collaborators.user_id = auth.uid()
+        )
+    );
+
+CREATE POLICY "Users can create spreadsheets" ON public.spreadsheets
+    FOR INSERT WITH CHECK (auth.uid() = owner_id);
+
+CREATE POLICY "Users can update their own spreadsheets" ON public.spreadsheets
+    FOR UPDATE USING (auth.uid() = owner_id);
+
+CREATE POLICY "Users can delete their own spreadsheets" ON public.spreadsheets
+    FOR DELETE USING (auth.uid() = owner_id);
+
+-- Cells: Access follows spreadsheet access
+CREATE POLICY "Users can view cells of accessible spreadsheets" ON public.cells
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM public.spreadsheets
+            WHERE spreadsheets.id = cells.spreadsheet_id
+            AND (
+                spreadsheets.owner_id = auth.uid() OR
+                EXISTS (
+                    SELECT 1 FROM public.collaborators
+                    WHERE collaborators.spreadsheet_id = spreadsheets.id
+                    AND collaborators.user_id = auth.uid()
+                )
+            )
+        )
+    );
+
+CREATE POLICY "Users can modify cells of editable spreadsheets" ON public.cells
+    FOR ALL USING (
+        EXISTS (
+            SELECT 1 FROM public.spreadsheets
+            WHERE spreadsheets.id = cells.spreadsheet_id
+            AND (
+                spreadsheets.owner_id = auth.uid() OR
+                EXISTS (
+                    SELECT 1 FROM public.collaborators
+                    WHERE collaborators.spreadsheet_id = spreadsheets.id
+                    AND collaborators.user_id = auth.uid()
+                    AND collaborators.permission_level IN ('edit', 'admin')
+                )
+            )
+        )
+    );
+
+-- Similar policies for column_settings and row_settings
+CREATE POLICY "Users can manage column settings" ON public.column_settings
+    FOR ALL USING (
+        EXISTS (
+            SELECT 1 FROM public.spreadsheets
+            WHERE spreadsheets.id = column_settings.spreadsheet_id
+            AND spreadsheets.owner_id = auth.uid()
+        )
+    );
+
+CREATE POLICY "Users can manage row settings" ON public.row_settings
+    FOR ALL USING (
+        EXISTS (
+            SELECT 1 FROM public.spreadsheets
+            WHERE spreadsheets.id = row_settings.spreadsheet_id
+            AND spreadsheets.owner_id = auth.uid()
+        )
+    );
+
+-- Share links: Only owners can create/manage
+CREATE POLICY "Users can manage share links for their spreadsheets" ON public.share_links
+    FOR ALL USING (
+        EXISTS (
+            SELECT 1 FROM public.spreadsheets
+            WHERE spreadsheets.id = share_links.spreadsheet_id
+            AND spreadsheets.owner_id = auth.uid()
+        )
+    );
+
+-- Collaborators: Owners can manage
+CREATE POLICY "Users can view collaborators of their spreadsheets" ON public.collaborators
+    FOR SELECT USING (
+        user_id = auth.uid() OR
+        EXISTS (
+            SELECT 1 FROM public.spreadsheets
+            WHERE spreadsheets.id = collaborators.spreadsheet_id
+            AND spreadsheets.owner_id = auth.uid()
+        )
+    );
+
+CREATE POLICY "Owners can manage collaborators" ON public.collaborators
+    FOR ALL USING (
+        EXISTS (
+            SELECT 1 FROM public.spreadsheets
+            WHERE spreadsheets.id = collaborators.spreadsheet_id
+            AND spreadsheets.owner_id = auth.uid()
+        )
+    );
+
+-- Activity log: Users can view logs for their spreadsheets
+CREATE POLICY "Users can view activity logs" ON public.activity_log
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM public.spreadsheets
+            WHERE spreadsheets.id = activity_log.spreadsheet_id
+            AND (
+                spreadsheets.owner_id = auth.uid() OR
+                EXISTS (
+                    SELECT 1 FROM public.collaborators
+                    WHERE collaborators.spreadsheet_id = spreadsheets.id
+                    AND collaborators.user_id = auth.uid()
+                )
+            )
+        )
+    );
+
+-- =====================================================
+-- 11. USEFUL VIEWS
+-- =====================================================
+
+-- View for spreadsheet list with metadata
+CREATE OR REPLACE VIEW spreadsheet_list_view AS
+SELECT 
+    s.id,
+    s.title,
+    s.description,
+    s.owner_id,
+    p.username as owner_username,
+    s.created_at,
+    s.updated_at,
+    s.last_accessed_at,
+    (SELECT COUNT(*) FROM public.cells WHERE spreadsheet_id = s.id) as cell_count,
+    (SELECT COUNT(*) FROM public.collaborators WHERE spreadsheet_id = s.id) as collaborator_count
+FROM public.spreadsheets s
+JOIN public.profiles p ON s.owner_id = p.id
+WHERE s.is_deleted = FALSE;
+
+-- =====================================================
+-- 12. INITIAL DATA / SEED (Optional)
+-- =====================================================
+
+-- You can add seed data here if needed for testing
+
+-- =====================================================
+-- ADDITIONAL TRIGGER FOR AUTO PROFILE CREATION
+-- Run this in Supabase SQL Editor after your main schema
+-- =====================================================
+
+-- Function to automatically create profile when user signs up
+CREATE OR REPLACE FUNCTION public.handle_new_user() 
+RETURNS TRIGGER AS $$
+BEGIN
+    INSERT INTO public.profiles (id, username, email, full_name)
+    VALUES (
+        NEW.id,
+        COALESCE(
+            NEW.raw_user_meta_data->>'username',
+            SPLIT_PART(NEW.email, '@', 1)
+        ),
+        NEW.email,
+        NEW.raw_user_meta_data->>'full_name'
+    );
+    RETURN NEW;
+EXCEPTION
+    WHEN unique_violation THEN
+        -- If profile already exists, just return
+        RETURN NEW;
+    WHEN OTHERS THEN
+        -- Log error but don't fail signup
+        RAISE WARNING 'Error creating profile for user %: %', NEW.id, SQLERRM;
+        RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Drop trigger if exists and recreate
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+
+-- Create trigger to auto-create profile on signup
+CREATE TRIGGER on_auth_user_created
+    AFTER INSERT ON auth.users
+    FOR EACH ROW 
+    EXECUTE FUNCTION public.handle_new_user();
+
+-- =====================================================
+-- FIX: Add policy for inserting profiles (needed for trigger)
+-- =====================================================
+
+-- Allow service role to insert profiles (for the trigger)
+CREATE POLICY "Service role can insert profiles" ON public.profiles
+    FOR INSERT 
+    WITH CHECK (true);
+
+-- Enable realtime for cells table (for collaborative editing)
+-- Make sure 'cells' table is added to publication
+DO $$
+BEGIN
+    -- Check if publication exists and add table
+    IF EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime') THEN
+        ALTER PUBLICATION supabase_realtime ADD TABLE public.cells;
+    END IF;
+EXCEPTION
+    WHEN duplicate_object THEN
+        -- Table already in publication, ignore
+        NULL;
+END $$;
+
+-- Spreadsheets: only owners can manage
+DROP POLICY IF EXISTS "Users can view their own spreadsheets" ON public.spreadsheets;
+CREATE POLICY "Users can view spreadsheets they own" ON public.spreadsheets
+    FOR SELECT USING (auth.uid() = owner_id);
+
+-- Collaborators: give users access to spreadsheet rows by join
+DROP POLICY IF EXISTS "Users can view spreadsheets shared with them" ON public.spreadsheets;
+CREATE POLICY "Users can view spreadsheets shared with them" ON public.spreadsheets
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM public.collaborators
+            WHERE collaborators.spreadsheet_id = spreadsheets.id
+            AND collaborators.user_id = auth.uid()
+        )
+    );
